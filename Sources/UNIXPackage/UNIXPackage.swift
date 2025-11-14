@@ -56,8 +56,11 @@ struct CLI {
         }
 
         do {
-            let installed = try manager.install(packageNamed: arguments[2])
-            print("Installed \(installed.name) \(installed.version)")
+            let report = try manager.install(packageNamed: arguments[2])
+            print("Starting installation via \(report.package.distribution.displayName).")
+            report.steps.forEach { print("  - \($0)") }
+            print("Installed \(report.package.name) \(report.package.version)")
+            print("Destination: \(report.package.installLocation)")
         } catch {
             Self.printError(error.localizedDescription)
         }
@@ -85,7 +88,8 @@ struct CLI {
         }
 
         for pkg in packages {
-            print("\(pkg.name) \(pkg.version) — installed \(pkg.formattedInstallDate)")
+            print("\(pkg.name) \(pkg.version) [\(pkg.distribution.displayName)] — installed \(pkg.formattedInstallDate)")
+            print("  Location: \(pkg.installLocation)")
         }
     }
 
@@ -99,7 +103,9 @@ struct CLI {
 
         for pkg in matches {
             let platforms = pkg.supportedPlatforms.map(\.displayName).joined(separator: ", ")
-            print("\(pkg.name) \(pkg.version) [\(platforms)]")
+            print("\(pkg.name) \(pkg.version) [\(platforms)] — \(pkg.distribution.displayName)")
+            print("  Source: \(pkg.distribution.downloadDescription)")
+            print("  Installs to: \(pkg.distribution.installLocation(for: pkg.name))")
             print("  \(pkg.description)")
         }
     }
@@ -117,6 +123,8 @@ struct CLI {
             print("Homepage: \(pkg.homepage)")
             let platforms = pkg.supportedPlatforms.map(\.displayName).joined(separator: ", ")
             print("Platforms: \(platforms)")
+            print("Type: \(pkg.distribution.displayName) — \(pkg.distribution.downloadDescription)")
+            print("Installs to: \(pkg.distribution.installLocation(for: pkg.name))")
         } else {
             print("No information found for \(arguments[2]).")
         }
@@ -169,7 +177,7 @@ struct PackageManager {
         store.installedPackages
     }
 
-    func install(packageNamed name: String) throws -> InstalledPackage {
+    func install(packageNamed name: String) throws -> InstallReport {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let package = repository.package(named: normalized) else {
             throw PackageManagerError.packageNotFound(name)
@@ -187,7 +195,9 @@ struct PackageManager {
         }
 
         do {
-            return try store.install(package)
+            let installed = try store.install(package)
+            let steps = package.distribution.installSteps(for: package.name)
+            return InstallReport(package: installed, steps: steps)
         } catch {
             throw PackageManagerError.storageFailure(error.localizedDescription)
         }
@@ -270,56 +280,72 @@ struct PackageRepository {
             version: "8.7.1",
             description: "Command-line tool for transferring data with URL syntax.",
             homepage: "https://curl.se",
-            supportedPlatforms: [.macOS, .linux, .freeBSD, .openBSD]
+            supportedPlatforms: [.macOS, .linux, .freeBSD, .openBSD],
+            distribution: .repositoryBundle
         ),
         Package(
             name: "wget",
             version: "1.24.5",
             description: "Non-interactive network downloader supporting HTTP, HTTPS, and FTP.",
             homepage: "https://www.gnu.org/software/wget/",
-            supportedPlatforms: [.macOS, .linux, .freeBSD]
+            supportedPlatforms: [.macOS, .linux, .freeBSD],
+            distribution: .repositoryBundle
         ),
         Package(
             name: "git",
             version: "2.45.1",
             description: "Distributed version control system.",
             homepage: "https://git-scm.com",
-            supportedPlatforms: [.macOS, .linux, .freeBSD, .openBSD]
+            supportedPlatforms: [.macOS, .linux, .freeBSD, .openBSD],
+            distribution: .pkgInstaller
         ),
         Package(
             name: "openssl",
             version: "3.2.1",
             description: "Toolkit for TLS and general-purpose cryptography.",
             homepage: "https://www.openssl.org",
-            supportedPlatforms: [.macOS, .linux, .freeBSD, .openBSD, .solaris]
+            supportedPlatforms: [.macOS, .linux, .freeBSD, .openBSD, .solaris],
+            distribution: .repositoryBundle
         ),
         Package(
             name: "python",
             version: "3.12.3",
             description: "High-level programming language focused on readability.",
             homepage: "https://www.python.org",
-            supportedPlatforms: [.macOS, .linux, .freeBSD]
+            supportedPlatforms: [.macOS, .linux, .freeBSD],
+            distribution: .pkgInstaller
         ),
         Package(
             name: "node",
             version: "22.2.0",
             description: "JavaScript runtime built on Chrome's V8 engine.",
             homepage: "https://nodejs.org",
-            supportedPlatforms: [.macOS, .linux]
+            supportedPlatforms: [.macOS, .linux],
+            distribution: .pkgInstaller
         ),
         Package(
             name: "neovim",
             version: "0.9.5",
             description: "Refactor-friendly fork of Vim with modern features.",
             homepage: "https://neovim.io",
-            supportedPlatforms: [.macOS, .linux, .freeBSD]
+            supportedPlatforms: [.macOS, .linux, .freeBSD],
+            distribution: .repositoryBundle
         ),
         Package(
             name: "htop",
             version: "3.3.0",
             description: "Interactive process viewer for Unix systems.",
             homepage: "https://htop.dev",
-            supportedPlatforms: [.macOS, .linux, .freeBSD]
+            supportedPlatforms: [.macOS, .linux, .freeBSD],
+            distribution: .repositoryBundle
+        ),
+        Package(
+            name: "ArcBrowser",
+            version: "1.16.4",
+            description: "Minimal macOS browser delivered as a signed DMG.",
+            homepage: "https://arc.net",
+            supportedPlatforms: [.macOS],
+            distribution: .dmgApp
         )
     ]
 }
@@ -351,11 +377,40 @@ struct Package: Codable {
         }
     }
 
+    enum Distribution: String, Codable {
+        case dmgApp
+        case pkgInstaller
+        case repositoryBundle
+
+        var displayName: String {
+            switch self {
+            case .dmgApp:
+                return "DMG → /Applications"
+            case .pkgInstaller:
+                return "PKG Installer"
+            case .repositoryBundle:
+                return "Repository Bundle"
+            }
+        }
+
+        var downloadDescription: String {
+            switch self {
+            case .dmgApp:
+                return "Direct DMG download, mount, and copy the .app into /Applications."
+            case .pkgInstaller:
+                return "Direct PKG download installed with macOS Installer."
+            case .repositoryBundle:
+                return "Fetches a UNIXPackage bundle from the central repository."
+            }
+        }
+    }
+
     let name: String
     let version: String
     let description: String
     let homepage: String
     let supportedPlatforms: [Platform]
+    let distribution: Distribution
 
     func supportsCurrentPlatform() -> Bool {
         guard let current = Platform.current else {
@@ -371,13 +426,25 @@ struct InstalledPackage: Codable {
     let description: String
     let homepage: String
     let installedAt: Date
+    let distribution: Package.Distribution
+    let installLocation: String
 
-    init(name: String, version: String, description: String, homepage: String, installedAt: Date = Date()) {
+    init(
+        name: String,
+        version: String,
+        description: String,
+        homepage: String,
+        installedAt: Date = Date(),
+        distribution: Package.Distribution,
+        installLocation: String
+    ) {
         self.name = name
         self.version = version
         self.description = description
         self.homepage = homepage
         self.installedAt = installedAt
+        self.distribution = distribution
+        self.installLocation = installLocation
     }
 
     init(from package: Package) {
@@ -385,13 +452,67 @@ struct InstalledPackage: Codable {
             name: package.name,
             version: package.version,
             description: package.description,
-            homepage: package.homepage
+            homepage: package.homepage,
+            installedAt: Date(),
+            distribution: package.distribution,
+            installLocation: package.distribution.installLocation(for: package.name)
         )
     }
 
     var formattedInstallDate: String {
         ISO8601DateFormatter().string(from: installedAt)
     }
+}
+
+struct InstallReport {
+    let package: InstalledPackage
+    let steps: [String]
+}
+
+extension Package.Distribution {
+    func installLocation(for packageName: String) -> String {
+        switch self {
+        case .dmgApp:
+            return "/Applications/\(packageName).app"
+        case .pkgInstaller:
+            return "/usr/local/\(canonicalInstallName(packageName))"
+        case .repositoryBundle:
+            return "/opt/unixpackage/\(canonicalInstallName(packageName))"
+        }
+    }
+
+    func installSteps(for packageName: String) -> [String] {
+        switch self {
+        case .dmgApp:
+            return [
+                "Download \(packageName).dmg directly from the vendor.",
+                "Mount the disk image using hdiutil.",
+                "Copy \(packageName).app into /Applications.",
+                "Detach the disk image and remove temporary files."
+            ]
+        case .pkgInstaller:
+            return [
+                "Download \(packageName).pkg directly from the vendor.",
+                "Run /usr/sbin/installer -pkg \(packageName).pkg -target /.",
+                "Verify installer receipts and binaries in the destination.",
+                "Remove the downloaded PKG."
+            ]
+        case .repositoryBundle:
+            return [
+                "Fetch metadata from the UNIXPackage repository.",
+                "Download the signed .upkg archive for \(packageName).",
+                "Extract files into \(installLocation(for: packageName)).",
+                "Register the package manifest with the local store."
+            ]
+        }
+    }
+}
+
+private func canonicalInstallName(_ name: String) -> String {
+    name
+        .lowercased()
+        .replacingOccurrences(of: " ", with: "-")
+        .replacingOccurrences(of: ".", with: "-")
 }
 
 final class PackageStore {
